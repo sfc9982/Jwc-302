@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  functional:
+    name: Functional (${{ matrix.os }}, Go ${{ matrix.go }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            go: '1.21.x'
+          - os: ubuntu-latest
+            go: stable
+          - os: windows-latest
+            go: stable
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+      - name: Verify dependency checksums
+        run: go mod verify
+      - name: Check formatting
+        run: |
+          files=$(gofmt -l *.go)
+          if [ -n "$files" ]; then
+            printf 'Unformatted Go files:\n%s\n' "$files"
+            exit 1
+          fi
+      - name: Static analysis (including process tests)
+        run: go vet -tags=integration ./...
+      - name: Unit and real HTTP behavior tests (random order, repeated)
+        run: go test -shuffle=on -count=3 -timeout=120s -coverprofile=coverage.out ./...
+      - name: Real executable functional tests
+        run: go test -tags=integration -run '^TestGatewayProcess$' -count=1 -timeout=180s -v ./...
+      - name: Coverage report
+        run: go tool cover -func=coverage.out
+      - name: Upload coverage
+        if: matrix.os == 'ubuntu-latest' && matrix.go == 'stable'
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 14
+
+  race-and-fuzz:
+    name: Race detection and URL fuzzing
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+      - name: Detect races during concurrent reloads and requests
+        run: go test -race -shuffle=on -count=2 -timeout=120s ./...
+      - name: Fuzz redirect origin, path and query invariants
+        run: go test -run='^$' -fuzz='^FuzzBuildTarget$' -fuzztime=20s -parallel=2 -timeout=90s .
+      - name: Upload failing fuzz cases
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-regressions
+          path: testdata/fuzz/
+          if-no-files-found: ignore

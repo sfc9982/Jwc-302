@@ -1,0 +1,28 @@
+# Compiled binary
+/main
+/main.exe
+Jwc-302
+Jwc-302.exe
+
+# Go build artifacts
+*.o
+*.a
+*.so
+/vendor/
+/.gocache
+/.gomodcache
+
+# IDE
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local deployment settings
+.env
+
+# Test reports
+/coverage.out
+/coverage.html

@@ -1,0 +1,6 @@
+# Example rules only. Replace with the networks of your own deployment.
+# Private IPv4 network
+10.0.0.0/8
+# Documentation-only IPv4 and IPv6 networks
+192.0.2.0/24
+2001:db8::/32

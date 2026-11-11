@@ -1,0 +1,21 @@
+[Unit]
+Description=Jwc-302 redirect gateway
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/jwc-302
+EnvironmentFile=-/opt/jwc-302/.env
+ExecStart=/opt/jwc-302/jwc-302
+Restart=on-failure
+RestartSec=5
+
+# 安全加固
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
