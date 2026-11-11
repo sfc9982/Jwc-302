@@ -1,0 +1,3 @@
+# Example only: VPN and guest pools nested inside campus prefixes.
+10.20.0.0/16
+2001:db8:ffff::/48

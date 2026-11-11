@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -19,138 +17,57 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-var (
-	ipRanges   []*net.IPNet
-	ipRangesMu sync.RWMutex
+var logger *slog.Logger
 
-	logger *slog.Logger
-)
+func main() { os.Exit(run()) }
 
-type config struct {
-	ListenAddr          string
-	IPRangeFile         string
-	InternalRedirectURL string
-	ExternalRedirectURL string
-	HealthPath          string
-	ReloadInterval      time.Duration
-	RequestTimeout      time.Duration
-	CheckUpstream       bool
-	LogJSON             bool
-	trustedProxies      []*net.IPNet
-}
-
-func main() {
+func run() int {
 	cfg := parseConfig()
 	initLogger(cfg)
-
-	if err := loadIPRanges(cfg.IPRangeFile); err != nil {
+	if err := loadRangeFiles(cfg.IPRangeFile, cfg.ExcludeIPRangeFile); err != nil {
 		logger.Error("failed to load iprange file", "error", err)
-		os.Exit(1)
+		return 1
 	}
 	ipRangesMu.RLock()
-	logger.Info("loaded iprange entries", "file", cfg.IPRangeFile, "count", len(ipRanges))
+	included, excluded := len(ipRanges), len(excludedRanges)
 	ipRangesMu.RUnlock()
-
-	if cfg.ReloadInterval > 0 {
-		startReloader(cfg.IPRangeFile, cfg.ReloadInterval)
+	if cfg.CheckConfig {
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"status": "valid", "ip_ranges": included, "excluded_ranges": excluded})
+		return 0
 	}
-
-	server := &fasthttp.Server{
-		Handler:      makeHandler(cfg),
-		ReadTimeout:  cfg.RequestTimeout,
-		WriteTimeout: cfg.RequestTimeout,
-	}
-
-	go func() {
-		logger.Info("server started", "addr", cfg.ListenAddr)
-		if err := server.ListenAndServe(cfg.ListenAddr); err != nil {
-			logger.Error("server error", "error", err)
-			os.Exit(1)
-		}
-	}()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-
-	logger.Info("shutting down gracefully")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		if err := server.Shutdown(); err != nil {
-			logger.Error("shutdown error", "error", err)
-		}
-	}()
-
-	select {
-	case <-done:
-		logger.Info("shutdown complete")
-	case <-shutdownCtx.Done():
-		logger.Warn("shutdown timed out")
-	}
-}
-
-func parseConfig() *config {
-	listenAddr := flag.String("addr", envOrDefault("LISTEN_ADDR", "127.0.0.1:8080"), "listen address")
-	ipRangeFile := flag.String("iprange", envOrDefault("IPRANGE_FILE", "iprange.txt"), "path to iprange file")
-	internalURL := flag.String("internal", envOrDefault("INTERNAL_URL", "https://internal.example.edu/jsxsd/"), "internal redirect base URL")
-	externalURL := flag.String("external", envOrDefault("EXTERNAL_URL", "https://vpn.example.edu/jsxsd/"), "external redirect base URL")
-	healthPath := flag.String("health", envOrDefault("HEALTH_PATH", "/health"), "health check path")
-	trustedProxiesStr := flag.String("trusted-proxies", envOrDefault("TRUSTED_PROXIES", ""), "trusted proxy CIDRs, comma separated")
-	reloadInterval := flag.Duration("reload-interval", parseDurationEnv("RELOAD_INTERVAL", 5*time.Minute), "iprange reload interval (0 to disable)")
-	requestTimeout := flag.Duration("request-timeout", parseDurationEnv("REQUEST_TIMEOUT", 5*time.Second), "request timeout")
-	checkUpstream := flag.Bool("check-upstream", parseBoolEnv("CHECK_UPSTREAM", false), "check upstream URLs in health endpoint")
-	logJSON := flag.Bool("log-json", parseBoolEnv("LOG_JSON", false), "output JSON logs")
-	flag.Parse()
-
-	trusted, err := parseCIDRList(*trustedProxiesStr)
+	listener, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "invalid trusted-proxies: %v\n", err)
-		os.Exit(1)
+		logger.Error("listen failed", "error", err)
+		return 1
 	}
-
-	cfg := &config{
-		ListenAddr:          *listenAddr,
-		IPRangeFile:         *ipRangeFile,
-		InternalRedirectURL: normalizeBaseURL(*internalURL),
-		ExternalRedirectURL: normalizeBaseURL(*externalURL),
-		HealthPath:          *healthPath,
-		ReloadInterval:      *reloadInterval,
-		RequestTimeout:      *requestTimeout,
-		CheckUpstream:       *checkUpstream,
-		LogJSON:             *logJSON,
-		trustedProxies:      trusted,
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if cfg.ReloadInterval > 0 {
+		startReloader(ctx, cfg)
 	}
-	if err := validateConfig(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "invalid configuration: %v\n", err)
-		os.Exit(1)
-	}
-	return cfg
-}
-
-func validateConfig(cfg *config) error {
-	if cfg.RequestTimeout <= 0 || cfg.ReloadInterval < 0 {
-		return fmt.Errorf("request-timeout must be positive and reload-interval must be non-negative")
-	}
-	if _, _, err := net.SplitHostPort(cfg.ListenAddr); err != nil {
-		return fmt.Errorf("invalid listen address: %w", err)
-	}
-	if cfg.HealthPath != "" && (!strings.HasPrefix(cfg.HealthPath, "/") || strings.ContainsAny(cfg.HealthPath, "?#")) {
-		return fmt.Errorf("health path must start with / and contain no query or fragment")
-	}
-	for _, base := range []string{cfg.InternalRedirectURL, cfg.ExternalRedirectURL} {
-		u, err := url.Parse(base)
+	server := &fasthttp.Server{Handler: makeHandler(cfg), ReadTimeout: cfg.RequestTimeout, WriteTimeout: cfg.RequestTimeout}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(listener) }()
+	logger.Info("server started", "addr", listener.Addr().String(), "ip_ranges", included, "excluded_ranges", excluded)
+	select {
+	case err := <-done:
 		if err != nil {
-			return fmt.Errorf("invalid redirect URL: %w", err)
+			logger.Error("server error", "error", err)
+			return 1
 		}
-		if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(base, "#") || unsafePath(u.Path) {
-			return fmt.Errorf("redirect URL must be an absolute HTTP(S) URL without credentials, query, fragment or traversal")
-		}
+		return 0
+	case <-ctx.Done():
 	}
-	return nil
+	stop()
+	logger.Info("shutting down gracefully")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	defer cancel()
+	if err := server.ShutdownWithContext(shutdownCtx); err != nil {
+		logger.Error("shutdown timed out", "error", err)
+		return 1
+	}
+	logger.Info("shutdown complete")
+	return 0
 }
 
 func initLogger(cfg *config) {
@@ -164,150 +81,35 @@ func initLogger(cfg *config) {
 	logger = slog.New(handler)
 }
 
-func normalizeBaseURL(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return s
-	}
-	if !strings.HasSuffix(s, "/") {
-		s += "/"
-	}
-	return s
-}
-
-func envOrDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-func parseDurationEnv(key string, def time.Duration) time.Duration {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "invalid %s: %v\n", key, err)
-		os.Exit(1)
-	}
-	return d
-}
-
-func parseBoolEnv(key string, def bool) bool {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	switch strings.ToLower(v) {
-	case "1", "true", "yes", "on":
-		return true
-	case "0", "false", "no", "off":
-		return false
-	default:
-		fmt.Fprintf(os.Stderr, "invalid %s: expected bool\n", key)
-		os.Exit(1)
-		return def
-	}
-}
-
-func parseCIDRList(s string) ([]*net.IPNet, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return nil, nil
-	}
-	var out []*net.IPNet
-	for _, part := range strings.Split(s, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		_, ipNet, err := net.ParseCIDR(part)
-		if err != nil {
-			return nil, fmt.Errorf("invalid CIDR %q: %w", part, err)
-		}
-		out = append(out, ipNet)
-	}
-	return out, nil
-}
-
-func loadIPRanges(filename string) error {
-	file, err := os.Open(filename)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", filename, err)
-	}
-	defer file.Close()
-
-	var ranges []*net.IPNet
-	scanner := bufio.NewScanner(file)
-	lineNum := 0
-	for scanner.Scan() {
-		lineNum++
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		_, ipNet, err := net.ParseCIDR(line)
-		if err != nil {
-			return fmt.Errorf("parse line %d %q: %w", lineNum, line, err)
-		}
-		ranges = append(ranges, ipNet)
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read %s: %w", filename, err)
-	}
-
-	ipRangesMu.Lock()
-	ipRanges = ranges
-	ipRangesMu.Unlock()
-	return nil
-}
-
-func startReloader(filename string, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	go func() {
-		for range ticker.C {
-			if err := loadIPRanges(filename); err != nil {
-				logger.Warn("failed to reload iprange file", "error", err)
-				continue
-			}
-			ipRangesMu.RLock()
-			count := len(ipRanges)
-			ipRangesMu.RUnlock()
-			logger.Info("reloaded iprange file", "file", filename, "count", count)
-		}
-	}()
-}
-
 func makeHandler(cfg *config) func(*fasthttp.RequestCtx) {
 	return func(ctx *fasthttp.RequestCtx) {
-		path := string(ctx.Path())
+		request, err := parseOriginURI(string(ctx.RequestURI()))
+		if err != nil {
+			ctx.Error("invalid request path", fasthttp.StatusBadRequest)
+			return
+		}
+		path := request.Path
 		if cfg.HealthPath != "" && path == cfg.HealthPath {
 			healthHandler(ctx, cfg)
 			return
 		}
 
+		if cfg.ReadyPath != "" && path == cfg.ReadyPath {
+			serveHealth(ctx, cfg, true)
+			return
+		}
 		realIP := clientIP(ctx, cfg.trustedProxies)
 
 		ipRangesMu.RLock()
-		ranges := make([]*net.IPNet, len(ipRanges))
-		copy(ranges, ipRanges)
+		excluded := containsAny(realIP, excludedRanges)
+		matched := containsAny(realIP, ipRanges) && !excluded
 		ipRangesMu.RUnlock()
-
-		matched := false
-		for _, ipNet := range ranges {
-			if ipNet.Contains(realIP) {
-				matched = true
-				break
-			}
-		}
 
 		base := cfg.ExternalRedirectURL
 		if matched {
 			base = cfg.InternalRedirectURL
 		}
-		target, err := buildTarget(base, string(ctx.RequestURI()))
+		target, err := buildTargetFromURI(base, request)
 		if err != nil {
 			ctx.Error("invalid request path", fasthttp.StatusBadRequest)
 			return
@@ -315,16 +117,22 @@ func makeHandler(cfg *config) func(*fasthttp.RequestCtx) {
 
 		ctx.Response.Header.Set("Cache-Control", "no-store")
 		ctx.Response.Header.Set("Location", target)
-		ctx.SetStatusCode(fasthttp.StatusFound)
+		ctx.SetStatusCode(cfg.RedirectCode)
 
+		logURI, logTarget := string(ctx.RequestURI()), target
+		if !cfg.LogQuery {
+			logURI, _, _ = strings.Cut(logURI, "?")
+			logTarget, _, _ = strings.Cut(logTarget, "?")
+		}
 		logger.Info("redirect",
 			"method", string(ctx.Method()),
-			"uri", string(ctx.RequestURI()),
+			"uri", logURI,
 			"direct_ip", ctx.RemoteIP(),
 			"real_ip", realIP,
 			"matched", matched,
-			"target", target,
-			"status", fasthttp.StatusFound,
+			"target", logTarget,
+			"excluded", excluded,
+			"status", cfg.RedirectCode,
 		)
 	}
 }
@@ -383,24 +191,37 @@ func unsafePath(path string) bool {
 	return false
 }
 
-func buildTarget(base, requestURI string) (string, error) {
-	u, err := url.Parse(base)
-	if err != nil {
-		return "", err
-	}
+func parseOriginURI(requestURI string) (*url.URL, error) {
 	if requestURI == "" {
 		requestURI = "/"
 	}
 	if !strings.HasPrefix(requestURI, "/") || strings.HasPrefix(requestURI, "//") || strings.Contains(requestURI, "#") {
-		return "", fmt.Errorf("expected an origin-form request URI")
+		return nil, fmt.Errorf("expected an origin-form request URI")
 	}
 	rel, err := url.ParseRequestURI(requestURI)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if unsafePath(rel.Path) {
-		return "", fmt.Errorf("path traversal is not allowed")
+		return nil, fmt.Errorf("path traversal is not allowed")
 	}
+	return rel, nil
+}
+
+func buildTarget(base, requestURI string) (string, error) {
+	request, err := parseOriginURI(requestURI)
+	if err != nil {
+		return "", err
+	}
+	return buildTargetFromURI(base, request)
+}
+
+func buildTargetFromURI(base string, rel *url.URL) (string, error) {
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", err
+	}
+
 	basePath := u.EscapedPath()
 	requestPath := rel.EscapedPath()
 	// Accept both /page and /jsxsd/page without duplicating the base.
@@ -419,35 +240,41 @@ func buildTarget(base, requestURI string) (string, error) {
 }
 
 type healthResponse struct {
-	Status   string            `json:"status"`
-	Time     string            `json:"time"`
-	IPRanges int               `json:"ip_ranges"`
-	Upstream map[string]string `json:"upstream,omitempty"`
+	Status         string            `json:"status"`
+	Time           string            `json:"time"`
+	IPRanges       int               `json:"ip_ranges"`
+	Upstream       map[string]string `json:"upstream,omitempty"`
+	ExcludedRanges int               `json:"excluded_ranges"`
+	LastReload     string            `json:"last_reload,omitempty"`
+	RulesStale     bool              `json:"rules_stale"`
 }
 
-func healthHandler(ctx *fasthttp.RequestCtx, cfg *config) {
+func healthHandler(ctx *fasthttp.RequestCtx, cfg *config) { serveHealth(ctx, cfg, false) }
+
+func serveHealth(ctx *fasthttp.RequestCtx, cfg *config, readiness bool) {
 	resp := healthResponse{
 		Status: "ok",
 		Time:   time.Now().Format(time.RFC3339),
 	}
 	ipRangesMu.RLock()
 	resp.IPRanges = len(ipRanges)
+	resp.ExcludedRanges = len(excludedRanges)
+	resp.RulesStale = ruleState.Failed
+	if !ruleState.LastSuccess.IsZero() {
+		resp.LastReload = ruleState.LastSuccess.Format(time.RFC3339)
+	}
 	ipRangesMu.RUnlock()
+	if readiness && resp.RulesStale {
+		resp.Status = "degraded"
+	}
 
-	if cfg.CheckUpstream {
+	if cfg.CheckUpstream || (readiness && cfg.ReadyCheckUpstream) {
 		// Reserve half the response timeout for scheduling and writing the result.
 		timeout := cfg.RequestTimeout - cfg.RequestTimeout/2
 		var internal, external string
 		var checks sync.WaitGroup
-		checks.Add(2)
-		go func() {
-			defer checks.Done()
-			internal = checkUpstream(cfg.InternalRedirectURL, timeout)
-		}()
-		go func() {
-			defer checks.Done()
-			external = checkUpstream(cfg.ExternalRedirectURL, timeout)
-		}()
+		checks.Go(func() { internal = checkUpstream(cfg.InternalRedirectURL, timeout) })
+		checks.Go(func() { external = checkUpstream(cfg.ExternalRedirectURL, timeout) })
 		checks.Wait()
 		resp.Upstream = map[string]string{"internal": internal, "external": external}
 		if internal != "ok" || external != "ok" {

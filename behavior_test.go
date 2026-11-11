@@ -24,7 +24,7 @@ import (
 // Child processes must not inherit a developer's gateway configuration.
 func gatewayTestEnv(extra ...string) []string {
 	keys := map[string]bool{}
-	for _, key := range []string{"LISTEN_ADDR", "IPRANGE_FILE", "INTERNAL_URL", "EXTERNAL_URL", "HEALTH_PATH", "TRUSTED_PROXIES", "RELOAD_INTERVAL", "REQUEST_TIMEOUT", "CHECK_UPSTREAM", "LOG_JSON", "JWC_TEST_CONFIG", "JWC_TEST_FLAGS", "JWC_CONFIG_PROBE", "JWC_CONFIG_ARGS"} {
+	for _, key := range []string{"LISTEN_ADDR", "IPRANGE_FILE", "INTERNAL_URL", "EXTERNAL_URL", "HEALTH_PATH", "TRUSTED_PROXIES", "RELOAD_INTERVAL", "REQUEST_TIMEOUT", "CHECK_UPSTREAM", "LOG_JSON", "CONFIG_FILE", "EXCLUDE_IPRANGE_FILE", "READY_PATH", "SHUTDOWN_TIMEOUT", "LOG_QUERY", "REDIRECT_CODE", "READY_CHECK_UPSTREAM", "JWC_TEST_CONFIG", "JWC_TEST_FLAGS", "JWC_CONFIG_PROBE", "JWC_CONFIG_ARGS"} {
 		keys[key] = true
 	}
 	for _, value := range extra {
@@ -72,12 +72,12 @@ func TestConfigurationBehavior(t *testing.T) {
 				t.Fatalf("unexpected defaults: %+v, proxies=%d", c, n)
 			}
 		}},
-		{name: "environment", env: []string{"LISTEN_ADDR=:9001", "INTERNAL_URL=https://inside.example/app", "EXTERNAL_URL=https://outside.example/app", "TRUSTED_PROXIES=127.0.0.1/32,::1/128", "RELOAD_INTERVAL=0", "REQUEST_TIMEOUT=2s", "CHECK_UPSTREAM=yes", "LOG_JSON=on", "HEALTH_PATH=/ready"}, verify: func(t *testing.T, c *config, n int) {
-			if c.ListenAddr != ":9001" || c.InternalRedirectURL != "https://inside.example/app/" || c.ExternalRedirectURL != "https://outside.example/app/" || c.HealthPath != "/ready" || c.ReloadInterval != 0 || c.RequestTimeout != 2*time.Second || !c.CheckUpstream || !c.LogJSON || n != 2 {
+		{name: "environment", env: []string{"LISTEN_ADDR=:9001", "INTERNAL_URL=https://inside.example/app", "EXTERNAL_URL=https://outside.example/app", "TRUSTED_PROXIES=127.0.0.1/32,::1/128", "RELOAD_INTERVAL=0", "REQUEST_TIMEOUT=2s", "CHECK_UPSTREAM=yes", "LOG_JSON=on", "HEALTH_PATH=/live"}, verify: func(t *testing.T, c *config, n int) {
+			if c.ListenAddr != ":9001" || c.InternalRedirectURL != "https://inside.example/app/" || c.ExternalRedirectURL != "https://outside.example/app/" || c.HealthPath != "/live" || c.ReloadInterval != 0 || c.RequestTimeout != 2*time.Second || !c.CheckUpstream || !c.LogJSON || n != 2 {
 				t.Fatalf("environment not applied: %+v, proxies=%d", c, n)
 			}
 		}},
-		{name: "flags override environment", env: []string{"LISTEN_ADDR=:9001", "RELOAD_INTERVAL=1m", "REQUEST_TIMEOUT=2s", "CHECK_UPSTREAM=true", "LOG_JSON=true", "HEALTH_PATH=/ready"}, args: []string{"-addr=:9002", "-reload-interval=0", "-request-timeout=3s", "-check-upstream=false", "-log-json=false", "-health="}, verify: func(t *testing.T, c *config, _ int) {
+		{name: "flags override environment", env: []string{"LISTEN_ADDR=:9001", "RELOAD_INTERVAL=1m", "REQUEST_TIMEOUT=2s", "CHECK_UPSTREAM=true", "LOG_JSON=true", "HEALTH_PATH=/live"}, args: []string{"-addr=:9002", "-reload-interval=0", "-request-timeout=3s", "-check-upstream=false", "-log-json=false", "-health="}, verify: func(t *testing.T, c *config, _ int) {
 			if c.ListenAddr != ":9002" || c.ReloadInterval != 0 || c.RequestTimeout != 3*time.Second || c.CheckUpstream || c.LogJSON || c.HealthPath != "" {
 				t.Fatalf("flags did not override environment: %+v", c)
 			}

@@ -47,7 +47,7 @@ func TestBuildTarget(t *testing.T) {
 func testConfig() *config {
 	return &config{
 		ListenAddr: "127.0.0.1:8080", InternalRedirectURL: "http://internal.example/jsxsd/",
-		ExternalRedirectURL: "https://external.example/jsxsd/", HealthPath: "/health", RequestTimeout: time.Second,
+		ExternalRedirectURL: "https://external.example/jsxsd/", HealthPath: "/health", RequestTimeout: time.Second, ShutdownTimeout: time.Second, RedirectCode: 302, IPRangeFile: "iprange.txt",
 	}
 }
 
@@ -112,10 +112,14 @@ func TestClientIP(t *testing.T) {
 func setTestRanges(t *testing.T) {
 	t.Helper()
 	old := ipRanges
+	oldExcluded, oldState := excludedRanges, ruleState
+	excludedRanges = nil
+	ruleState.LastSuccess = time.Time{}
+	ruleState.Failed = false
 	oldLogger := logger
 	logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	ipRanges, _ = parseCIDRList("10.0.0.0/8")
-	t.Cleanup(func() { ipRanges = old; logger = oldLogger })
+	t.Cleanup(func() { ipRanges = old; excludedRanges = oldExcluded; ruleState = oldState; logger = oldLogger })
 }
 
 func TestRedirectHandler(t *testing.T) {

@@ -1,5 +1,5 @@
 [Unit]
-Description=Jwc-302 redirect gateway
+Description=Configurable campus redirect gateway
 After=network.target
 
 [Service]
@@ -7,15 +7,19 @@ Type=simple
 User=www-data
 Group=www-data
 WorkingDirectory=/opt/jwc-302
-EnvironmentFile=-/opt/jwc-302/.env
-ExecStart=/opt/jwc-302/jwc-302
+EnvironmentFile=-/etc/jwc-302/environment
+ExecStartPre=/opt/jwc-302/jwc-302 -config=/etc/jwc-302/config.json -check-config
+ExecStart=/opt/jwc-302/jwc-302 -config=/etc/jwc-302/config.json
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=20s
+KillSignal=SIGTERM
 
-# 安全加固
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
+PrivateTmp=true
+UMask=0027
 
 [Install]
 WantedBy=multi-user.target

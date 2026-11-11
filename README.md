@@ -1,281 +1,192 @@
 # Jwc-302
 
 [![CI](https://github.com/sfc9982/Jwc-302/actions/workflows/ci.yml/badge.svg)](https://github.com/sfc9982/Jwc-302/actions/workflows/ci.yml)
-[![Go](https://img.shields.io/badge/Go-1.21%2B-00ADD8?logo=go)](https://go.dev/)
+[![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go)](https://go.dev/)
 
-基于 Go 的轻量教务系统入口分流网关。按客户端 IP 的 CIDR 归属，将浏览器 **302 重定向**到校内系统或校外 WebVPN 入口，并保留有效请求的路径与原始查询参数。
+面向高校基础设施管理员的教务入口分流网关：根据客户端 IPv4 / IPv6 的 CIDR 归属，将浏览器重定向到校内教务系统或校外 WebVPN，保留有效请求的路径与原始查询参数。
 
-适用于需要为多个网络环境提供统一入口的部署。网关仅返回跳转地址，后续登录、页面和下载请求由浏览器直接发送到目标系统。
+网关仅返回跳转地址，登录、页面和下载流量由浏览器直接连接目标系统。IP 分流用于选择入口；目标系统仍需独立鉴权。仓库内的域名、网段和配置均为通用示例，上线前必须替换。
 
-> 仓库内的域名和网段均为示例。上线前请替换成自己部署环境的地址及网段；本项目不提供教务系统或 VPN 服务，也不会代替目标系统的认证。
+## 运维功能
 
-## 请求如何分流
+- **分层配置**：命令行 > 环境变量 > JSON 配置文件 > 默认值；错误的被覆盖环境变量不会阻止启动。
+- **上线前校验**：`-check-config` 校验配置、校内与排除网段文件后退出，不监听端口、不访问上游。
+- **网段排除**：VPN / 访客地址池即使处于校内大网段中，也可以强制进入校外入口。
+- **一致热重载**：校内与排除文件均解析成功后一起替换；任一失败保留整组旧规则。
+- **存活与就绪分离**：`/health` 用于进程存活；`/ready` 在网段重载失败时返回 503，可独立开启上游探测。
+- **跳转策略**：默认 302 适合入口导航；可选 307 保留客户端请求方法与请求体。
+- **默认日志脱敏**：URI 和目标地址的查询参数默认不进入请求日志；真实 Location 保持完整。
+- **代理与退出**：可信代理链解析、IPv6、可配置请求与退出超时、停止服务时取消重载任务。
 
-```text
-浏览器 → 网关
-          ├─ /health → JSON 健康状态
-          └─ 其他路径 → 获取客户端 IP → 匹配 CIDR
-                                        ├─ 命中 → 校内入口
-                                        └─ 未命中 → 校外入口
-                                      HTTP 302 + Location
-```
-
-以默认入口目录 `/jsxsd/` 为例：
-
-| 请求 | 网段匹配 | 响应 Location |
-|---|---|---|
-| `/` | 命中 | `https://internal.example.edu/jsxsd/` |
-| `/course?id=1&id=2` | 命中 | `https://internal.example.edu/jsxsd/course?id=1&id=2` |
-| `/jsxsd/course?q=%2F` | 未命中 | `https://vpn.example.edu/jsxsd/course?q=%2F` |
-| `/%2e%2e/admin` | 任意 | HTTP 400，无 Location |
-
-入口目录来自配置的基地址，可以替换成其他系统路径。所有普通请求方法目前统一返回 302；浏览器可能在跳转时改变 POST 方法，因此建议将网关用于 GET/HEAD 入口导航。
-
-## 功能
-
-- IPv4 / IPv6 CIDR 匹配；未命中时使用校外入口。
-- 路径与原始查询串透传，已有入口目录时避免重复添加。
-- 固定跳转目标的协议和主机，拒绝目录穿越、反斜杠及非 origin-form URI。
-- 可信代理转发头解析，支持 `X-Forwarded-For` 与 `X-Real-IP`。
-- 网段文件定时热重载，解析失败保留上一次有效规则。
-- JSON / 文本请求日志、可选上游健康探测、请求读写超时。
-- SIGINT / SIGTERM 优雅退出，最多等待 10 秒。
-- 单个可执行文件，无数据库依赖；附带 systemd 与 Nginx 配置示例。
+Go 最低版本为 **1.26.0**，推荐工具链固定为 **1.27.4**。依赖使用 `fasthttp v1.78.0`；CI 验证 Go 1.26 和当前稳定版。
 
 ## 快速开始
-
-需要 Go 1.21 或更高版本。
 
 ```bash
 git clone https://github.com/sfc9982/Jwc-302.git
 cd Jwc-302
 go mod download
-go build -o jwc-302 .
-./jwc-302
+go build -trimpath -o jwc-302 .
+# 示例配置中的网段文件路径相对于配置文件所在目录
+./jwc-302 -config=config.example.json -check-config
+./jwc-302 -config=config.example.json
 ```
 
-默认仅监听 `127.0.0.1:8080`。PowerShell 下编译和运行使用：
-
-```powershell
-go build -o jwc-302.exe .
-.\jwc-302.exe
-```
-
-在另一个终端检查服务；Windows PowerShell 请使用 `curl.exe`：
+PowerShell 下使用 `go build -o jwc-302.exe .`，并以 `.\jwc-302.exe` 启动。`go` 会按 `toolchain` 指令选择推荐工具链；离线环境请预装相应版本并缓存依赖。
 
 ```bash
 curl -i http://127.0.0.1:8080/health
+curl -i http://127.0.0.1:8080/ready
 curl -I 'http://127.0.0.1:8080/course?id=1'
 ```
 
-健康端点默认返回 200；第二条请求从本机发起，按示例规则会返回校外入口的 302。不要使用 `curl -L` 验证示例目标，因为示例地址不代表可用的上游服务。
+Windows PowerShell 使用 `curl.exe`。默认仅监听 `127.0.0.1:8080`；本机不在示例校内网段内，所以第三个请求返回校外入口。示例目标并非可用的业务上游，验证时不要使用 `curl -L` 跟随它。
 
-### 配置网段
+生产部署、代理链、VPN 排除池、监控与回滚步骤见 **[管理员操作手册](docs/operations.md)**。
 
-`iprange.txt` 每行一个 CIDR，允许空行及以 `#` 开头的整行注释，不支持行尾注释：
+## 分流规则
 
 ```text
-# 替换为实际的校内网段
-10.0.0.0/8
-# 仅供文档演示的网段
-192.0.2.0/24
-2001:db8::/32
+请求 → /health 或 /ready → 健康状态 JSON
+     → 其他路径 → 提取可信客户端 IP
+                  ├─ 命中排除网段 → 校外入口
+                  ├─ 命中校内网段 → 校内入口
+                  └─ 其他地址     → 校外入口
+                 拼接有效路径与原始查询串 → 302 / 307
 ```
 
-IPv6 校内地址也必须配置对应规则。空文件是有效配置，会使全部请求进入校外入口。启动时文件不存在或格式错误，进程退出；运行中重载失败则保留旧规则并记录警告。默认每 5 分钟读取一次，可用 `-reload-interval=1m` 调整，`0` 关闭。
+| 请求 | 来源 | 默认结果 |
+|---|---|---|
+| `/` | 校内 | `https://internal.example.edu/jsxsd/` |
+| `/course?id=1&id=2` | 校内 | `https://internal.example.edu/jsxsd/course?id=1&id=2` |
+| `/jsxsd/course?q=%2F` | 校外或排除网段 | `https://vpn.example.edu/jsxsd/course?q=%2F` |
+| `/%2e%2e/admin` | 任意 | HTTP 400，无 Location |
 
-更新规则时，建议先写入同目录临时文件，再原子替换正式文件，避免读取到写入中的内容。
+已有入口目录时不会重复添加。入口目录由目标基地址决定，可配置为其他路径。目标基地址必须是绝对 HTTP(S) URL，不能包含用户凭据、查询串、片段或目录穿越。跳转响应设置 `Cache-Control: no-store`。
 
-### 本地验证两种入口
-
-启动服务时显式信任本机测试代理：
-
-```bash
-./jwc-302 -trusted-proxies=127.0.0.1/32
-```
-
-然后发送两种来源的请求：
-
-```bash
-# 示例校内来源 → internal.example.edu
-curl -I -H 'X-Forwarded-For: 10.1.2.3' http://127.0.0.1:8080/course
-# 示例校外来源 → vpn.example.edu
-curl -I -H 'X-Forwarded-For: 198.51.100.2' http://127.0.0.1:8080/course
-```
-
-生产环境只信任实际代理的地址。直接暴露服务时，保持 `TRUSTED_PROXIES` 为空，客户端自行提供的转发头会被忽略。
+302 对 POST 的后续处理由客户端决定；307 可以保留方法和请求体，但目标系统仍需接受该方法，并满足自身认证、Cookie、CSRF 等要求。
 
 ## 配置参考
 
-配置优先级为命令行参数 > 环境变量 > 默认值。当前时长和布尔环境变量会先做格式校验，即使传入命令行覆盖值，格式错误的对应环境变量仍会使进程退出。
+推荐从 [config.example.json](config.example.json) 复制 JSON 配置，或参考 [.env.example](.env.example)。程序不会自动读取 `.env`，需由 shell、systemd 或容器注入环境变量。
 
-程序**不会自动读取 `.env`**。手动启动请先导出环境变量；systemd 服务会读取可选的 `/opt/jwc-302/.env`，可从 `.env.example` 复制。
-
-| 参数 | 环境变量 | 默认值 | 含义 |
+| 命令行 | 环境变量 / JSON 键 | 默认值 | 用途 |
 |---|---|---|---|
-| `-addr` | `LISTEN_ADDR` | `127.0.0.1:8080` | 监听地址；直接对外服务时显式设为 `:8080` |
-| `-iprange` | `IPRANGE_FILE` | `iprange.txt` | CIDR 文件；相对路径基于工作目录 |
-| `-internal` | `INTERNAL_URL` | `https://internal.example.edu/jsxsd/` | 校内入口基地址 |
-| `-external` | `EXTERNAL_URL` | `https://vpn.example.edu/jsxsd/` | 校外入口基地址 |
-| `-health` | `HEALTH_PATH` | `/health` | 健康端点；命令行传 `-health=` 可关闭 |
-| `-trusted-proxies` | `TRUSTED_PROXIES` | 空 | 可信代理 CIDR，逗号分隔 |
-| `-reload-interval` | `RELOAD_INTERVAL` | `5m` | 网段重载周期，非负；`0` 关闭 |
-| `-request-timeout` | `REQUEST_TIMEOUT` | `5s` | 正数；请求读写超时，单个上游探测使用约一半预算 |
-| `-check-upstream` | `CHECK_UPSTREAM` | `false` | 健康端点是否探测两个上游 |
-| `-log-json` | `LOG_JSON` | `false` | 输出 JSON 日志 |
+| `-config` | `CONFIG_FILE` / 不适用 | 空 | 可选 JSON 文件；`-config=` 显式关闭环境变量指定的文件 |
+| `-check-config` | 不适用 | false | 校验配置和网段后退出，成功输出 JSON，退出码 0 |
+| `-addr` | `LISTEN_ADDR` / `listen_addr` | `127.0.0.1:8080` | 监听地址 |
+| `-iprange` | `IPRANGE_FILE` / `iprange_file` | `iprange.txt` | 校内网段文件 |
+| `-exclude-iprange` | `EXCLUDE_IPRANGE_FILE` / `exclude_iprange_file` | 空 | 排除文件；匹配后优先使用校外入口 |
+| `-internal` | `INTERNAL_URL` / `internal_url` | `https://internal.example.edu/jsxsd/` | 校内基地址 |
+| `-external` | `EXTERNAL_URL` / `external_url` | `https://vpn.example.edu/jsxsd/` | 校外基地址 |
+| `-health` | `HEALTH_PATH` / `health_path` | `/health` | 存活端点，显式空字符串关闭 |
+| `-ready` | `READY_PATH` / `ready_path` | `/ready` | 就绪端点，显式空字符串关闭 |
+| `-trusted-proxies` | `TRUSTED_PROXIES` / `trusted_proxies` | 空 | 可信代理 CIDR，逗号分隔 |
+| `-reload-interval` | `RELOAD_INTERVAL` / `reload_interval` | `5m` | 两个网段文件的读取周期；0 关闭 |
+| `-request-timeout` | `REQUEST_TIMEOUT` / `request_timeout` | `5s` | 请求读写超时；上游探测使用约一半预算 |
+| `-shutdown-timeout` | `SHUTDOWN_TIMEOUT` / `shutdown_timeout` | `10s` | 优雅退出最长等待时间 |
+| `-redirect-code` | `REDIRECT_CODE` / `redirect_code` | `302` | 允许 302、307 |
+| `-check-upstream` | `CHECK_UPSTREAM` / `check_upstream` | false | 兼容选项：两个健康端点均探测上游 |
+| `-ready-check-upstream` | `READY_CHECK_UPSTREAM` / `ready_check_upstream` | false | 仅就绪端点探测上游，适合负载均衡器 |
+| `-log-json` | `LOG_JSON` / `log_json` | false | JSON 日志 |
+| `-log-query` | `LOG_QUERY` / `log_query` | false | 是否记录查询参数，可能包含认证票据 |
 
-环境变量布尔值接受 `true/false`、`1/0`、`yes/no`、`on/off`，忽略大小写。空环境变量按未设置处理；CLI 布尔参数使用 `-log-json=true` / `-log-json=false`。
+JSON 中时长必须是字符串（如 `"5s"`）；布尔值和状态码使用原生 JSON 类型。配置文件拒绝未知字段、重复键、null、尾随数据及超过 1 MiB 的内容。文件本身始终进行结构和类型校验；最终合并后的配置再做语义校验。
 
-目标基地址必须是绝对 HTTP(S) URL，不能包含用户名、密码、查询串、片段或目录穿越路径；尾部斜杠会自动补齐。
+JSON **显式设置**的网段相对路径基于 JSON 文件目录；CLI、环境变量和默认路径基于进程工作目录。空环境变量按未设置处理；需要清空低优先级配置时，使用 `-exclude-iprange=`、`-ready=` 等显式 CLI 参数。环境变量布尔值支持 `true/false`、`1/0`、`yes/no`、`on/off`；CLI 布尔参数使用 `-log-json=false` 等形式。
 
-### 可信代理规则
+配置文件只在启动时读取。定时热重载仅作用于校内与排除 CIDR 文件；目标地址、代理列表、日志策略等修改后需要重新校验并重启服务。
 
-1. 检查直连 IP；不可信时忽略所有转发头。
-2. 存在非空 `X-Forwarded-For` 时，从右向左跳过可信代理，使用首个不可信 IP。
-3. 已检查的链条部分存在非法 IP 时，回退到直连 IP，不再使用 `X-Real-IP`。链条中更左侧、不参与判断的值不会继续解析。
-4. 链条全部可信时使用最左侧 IP。
-5. 没有非空 `X-Forwarded-For` 时，尝试 `X-Real-IP`，否则使用直连 IP。
+### CIDR 文件
 
-代理必须覆盖或正确追加转发头。不要将整个校内网段或 `0.0.0.0/0` 配为可信代理。
+每行一个 IPv4 / IPv6 CIDR，允许空行和以 `#` 开头的整行注释，不支持行尾注释。
 
-## 健康检查
+- [iprange.txt](iprange.txt) 是示例校内规则，包含 `10.0.0.0/8` 和文档示例网络。
+- [examples/excluded-iprange.txt](examples/excluded-iprange.txt) 演示从大网段中排除 `10.20.0.0/16` 等 VPN / 访客池。
+- 空校内文件有效，所有请求使用校外入口；空排除文件有效，相当于不排除。
+- 启动时任一启用文件缺失或错误，启动失败；运行中错误则保留整个旧快照，标记规则过期。
 
-```bash
-curl http://127.0.0.1:8080/health
-```
+### 可信代理
 
-默认只检查进程存活，不访问上游：
+直连 IP 不可信时，忽略转发头。可信时优先从 `X-Forwarded-For` 右向左跳过已知代理，使用首个不可信 IP；已检查部分出现非法 IP 则回退直连 IP。链条全部可信时使用最左侧 IP；只有没有非空 XFF 时才尝试 `X-Real-IP`。
 
-```json
-{"status":"ok","time":"2026-11-11T12:00:00+08:00","ip_ranges":3}
-```
+可信代理必须覆盖或正确追加转发头。不要把整个校园网段或任意来源配置为可信代理。具体单层和多层代理例子见操作手册。
 
-启用 `CHECK_UPSTREAM=true` 后，两个基地址会并行执行 GET 探测：
+## 监控与日志
+
+| 端点/选项 | 行为 |
+|---|---|
+| `/health` | 默认返回 200；规则重载失败仍表示进程存活，同时返回 `rules_stale=true` |
+| `/ready` | 规则重载失败返回 503；下一次成功重载自动恢复 200 |
+| `ready_check_upstream=true` | 仅 `/ready` 并行 GET 两个目标基地址；任一失败返回 503 |
+| `check_upstream=true` | 保留原行为：`/health` 与 `/ready` 均受上游探测结果影响 |
 
 ```json
 {
-  "status": "degraded",
+  "status": "ok",
   "time": "2026-11-11T12:00:00+08:00",
   "ip_ranges": 3,
-  "upstream": {"internal": "ok", "external": "status:503"}
+  "excluded_ranges": 1,
+  "last_reload": "2026-11-11T11:59:00+08:00",
+  "rules_stale": false
 }
 ```
 
-- 两个上游均返回 2xx / 3xx：HTTP 200，`status=ok`。
-- 任一失败或超时：HTTP 503，`status=degraded`，附带原因。
-- 探测不跟随重定向，响应体限制为 1 MiB；3xx 不代表最终登录页面正常。
-- 每次健康请求都会发起探测；该结果反映网关服务器的可达性，不代表所有用户网络的可达性。
-- 使用示例目标时保持上游探测关闭；部署后再按监控需求开启。
+探测接受 2xx/3xx，不跟随重定向，响应体限制 1 MiB。结果只代表网关服务器到上游的可达性，不验证最终登录页面。每次健康请求都会执行启用的探测，监控频率应考虑上游容量；使用示例目标时保持探测关闭。
 
-## 部署
-
-### Linux / systemd
-
-交叉编译（Bash）：
-
-```bash
-GOOS=linux GOARCH=amd64 go build -trimpath -o jwc-302 .
-```
-
-PowerShell：
-
-```powershell
-$env:GOOS='linux'
-$env:GOARCH='amd64'
-go build -trimpath -o jwc-302 .
-Remove-Item Env:GOOS, Env:GOARCH
-```
-
-将二进制、实际网段文件和配置文件部署到 `/opt/jwc-302/`，再安装仓库自带的服务文件：
-
-```bash
-sudo install -d -m 755 /opt/jwc-302
-sudo install -m 755 jwc-302 /opt/jwc-302/jwc-302
-sudo install -m 644 iprange.txt /opt/jwc-302/iprange.txt
-sudo install -m 600 -o root -g root .env.example /opt/jwc-302/.env
-# 编辑 /opt/jwc-302/.env 和 iprange.txt，替换示例目标与网段
-sudo install -m 644 jwc-302.service /etc/systemd/system/jwc-302.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now jwc-302
-sudo journalctl -u jwc-302 -f
-```
-
-服务使用 `www-data` 账户（目标系统需存在此账户），并以 `/opt/jwc-302` 为工作目录。systemd 读取 `.env` 后将变量注入服务；配置文件无需允许服务账户直接读取。
-
-### Nginx
-
-在已有 HTTPS 虚拟主机内添加：
-
-```nginx
-location / {
-    proxy_pass http://127.0.0.1:8080;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-}
-```
-
-对应设置 `TRUSTED_PROXIES=127.0.0.1/32`。TLS 证书由入口代理管理；302 后浏览器直接访问目标，上游也需要支持 HTTPS 才能保护后续连接。
-
-## 日志与运行边界
-
-启用 `LOG_JSON=true` 后，请求日志示例：
-
-```json
-{"time":"2026-11-11T12:00:00+08:00","level":"INFO","msg":"redirect","method":"GET","uri":"/course?id=1","direct_ip":"127.0.0.1","real_ip":"10.1.2.3","matched":true,"target":"https://internal.example.edu/jsxsd/course?id=1","status":302}
-```
-
-当前日志会记录完整 URI 和目标查询参数；如果业务链接含票据或敏感数据，请在日志采集侧脱敏并限制访问。IP 分流用于选择入口，目标系统仍需独立鉴权。
+默认请求日志的 `uri`、`target` 不含查询串，`Location` 仍保留原查询参数。`log_query=true` 仅用于受控排障，结束后关闭。日志包含客户端 IP，请按本单位的访问与保留策略管理。
 
 ## 测试与 CI
 
-测试使用临时文件、本机 TCP 服务和本地模拟上游，不依赖真实教务站点或 VPN。CI 不仅检查编译或进程能否启动，还断言实际 HTTP 状态、Location、查询参数、网段变更及错误恢复后的行为。
-
-| 测试层 | 验证内容 |
-|---|---|
-| 函数测试 | IPv4/IPv6 网段边界、IPv4-mapped 地址、代理链信任、URL 编码及查询保真、配置默认值/环境变量/CLI 覆盖、非法配置退出、文件加载失败保留旧规则 |
-| HTTP 功能测试 | 实际 TCP 请求的内外网分流、伪造转发头、重复入口目录、HEAD/POST、非法路径、Location 与禁止缓存响应头 |
-| 健康测试 | 自定义/关闭健康端点、JSON 字段、2xx/3xx/4xx/5xx、单边故障、连接失败、超时、超大响应 |
-| 真实进程测试 | 编译并启动可执行文件、启动失败、请求分流、有效热重载、无效文件保持旧规则、配置恢复、IPv6 来源、JSON 日志、Linux SIGTERM 优雅退出 |
-| 并发测试 | 同时重载规则、处理跳转及健康请求，在 race detector 下检查共享状态 |
-| 模糊测试 | 随机 URI 输入；成功输出必须保持目标协议/主机、入口路径边界和原始查询参数 |
-
-本地执行：
+测试使用临时文件、真实本机 TCP 服务、模拟上游以及编译后的网关程序，不依赖实际教务站点或 VPN。
 
 ```bash
-# 函数和 HTTP 功能测试；随机顺序重复运行
+# 随机顺序重复运行功能测试
 go test -shuffle=on -count=3 -coverprofile=coverage.out ./...
 go tool cover -func=coverage.out
-# PowerShell 中请将整个参数加引号：'-coverprofile=coverage.out'
+# PowerShell 下将整个参数加引号：'-coverprofile=coverage.out'
 
-# 真实可执行程序功能测试
+# 编译并启动真实进程，验证 JSON/CLI、热重载及恢复
 go test -tags=integration -run '^TestGatewayProcess$' -count=1 -timeout=180s -v ./...
-
-# 含进程测试代码的静态检查
 go vet -tags=integration ./...
 
 # 并发检测（需要支持 race 的平台和 C 编译器）
 go test -race -shuffle=on -count=2 ./...
 
-# URL 模糊测试；CI 使用 20 秒的固定预算
+# URL 保真和目标边界模糊测试
 go test -run='^$' -fuzz='^FuzzBuildTarget$' -fuzztime=20s -parallel=2 .
 ```
 
-[GitHub Actions](.github/workflows/ci.yml) 在每次推送到 `master`、PR 和手动触发时运行：Linux Go 1.21、Linux 稳定版、Windows 稳定版的完整功能测试；另外运行 Linux race 和 fuzz 任务。覆盖率报告作为构件保存 14 天，模糊测试失败时上传复现输入。Windows 不执行 POSIX SIGTERM 断言，该项由 Linux 任务覆盖。
+[CI](.github/workflows/ci.yml) 在推送到 `master`、PR、手动触发时运行 Linux Go 1.26、Linux 稳定版、Windows 稳定版功能测试，另有 Linux race 和 fuzz。设置 `GOTOOLCHAIN=local`，确保最低版本任务不会自动切换到推荐工具链。覆盖率报告保存 14 天；fuzz 失败会上传复现输入。
+
+测试覆盖配置优先级和严格 JSON 校验、IP/代理信任边界、排除网段、原子规则更新、307 实际 POST 方法/请求体保留、日志查询脱敏、健康与就绪隔离、失败恢复和 Linux SIGTERM 退出。Windows 不执行 POSIX SIGTERM 断言，由 Linux CI 覆盖。
 
 [Dependabot](.github/dependabot.yml) 每周检查 Go 模块和 Actions 更新。
 
-## 项目结构
+## 升级说明
+
+从早期版本升级时：
+
+1. 将构建环境从 Go 1.21 升级至 Go 1.26+，推荐 1.27.4。
+2. 默认请求日志不再含查询串；如采集规则依赖完整 URI，请调整。
+3. 新增 `/ready` 保留路径。已有业务使用该路径，或已将 `/ready` 配为存活端点时，设置不同的 `ready_path` 或 `-ready=`。
+4. 新 systemd 模板使用 `/etc/jwc-302/config.json` 和可选 `/etc/jwc-302/environment`；旧 `/opt/jwc-302/.env` 不再自动加载，需迁移。
+5. 使用 `-check-config` 验证后再切换二进制。一般配置变更需要重启，只有 CIDR 文件定时热重载。
+
+## 代码结构
 
 ```text
-main.go                      配置、分流、重载、健康检查和服务生命周期
-main_test.go                 基础回归测试
-behavior_test.go             功能边界、真实 HTTP、并发与 fuzz 测试
-process_integration_test.go   真实可执行程序功能测试（integration 标签）
-iprange.txt                  示例 CIDR 文件
-.env.example                 环境变量模板
-jwc-302.service              systemd 服务模板
-.github/workflows/ci.yml     跨平台功能测试与 race/fuzz CI
+main.go                       服务生命周期、分流、代理 IP、URL 与健康检查
+config.go                     CLI / 环境变量 / JSON 合并及校验
+ranges.go                     CIDR 读取、快照替换、重载状态与任务取消
+main_test.go / behavior_test.go 基础回归、HTTP、并发与 fuzz
+operators_test.go             配置、排除规则、监控和日志等运维功能测试
+process_integration_test.go    真实可执行程序集成测试
+config.example.json           通用 JSON 配置模板
+.env.example                  环境变量参考
+jwc-302.service               systemd 模板
+examples/                     示例排除网段
+docs/operations.md            部署、验收、监控和回滚手册
 ```
 
-提交改动前请执行 `gofmt -w *.go`，为行为变化补充测试，并运行功能测试与静态检查。避免将真实部署凭据、身份信息或环境专属配置提交到仓库。
+提交前执行 `gofmt -w *.go`，为行为变化补充功能测试。请勿提交真实机构标识、环境专属网段、地址或凭据。
