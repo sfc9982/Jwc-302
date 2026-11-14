@@ -3,7 +3,7 @@
 [![CI](https://github.com/sfc9982/Jwc-302/actions/workflows/ci.yml/badge.svg)](https://github.com/sfc9982/Jwc-302/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go)](https://go.dev/)
 
-面向高校基础设施管理员的教务入口分流网关：根据客户端 IPv4 / IPv6 的 CIDR 归属，将浏览器重定向到校内教务系统或校外 WebVPN，保留有效请求的路径与原始查询参数。
+面向高校场景的业务分流网关：IPv4/IPv6 CIDR 与排除规则、302/307、分层配置、可信代理、热重载、存活与就绪检查
 
 网关仅返回跳转地址，登录、页面和下载流量由浏览器直接连接目标系统。IP 分流用于选择入口；目标系统仍需独立鉴权。仓库内的域名、网段和配置均为通用示例，上线前必须替换。
 
@@ -29,9 +29,9 @@ git clone https://github.com/sfc9982/Jwc-302.git
 cd Jwc-302
 go mod download
 go build -trimpath -o jwc-302 .
-# 示例配置中的网段文件路径相对于配置文件所在目录
-./jwc-302 -config=config.example.json -check-config
-./jwc-302 -config=config.example.json
+# 示例 JSON 中的网段文件路径相对于 examples/ 目录
+./jwc-302 -config=examples/config.example.json -check-config
+./jwc-302 -config=examples/config.example.json
 ```
 
 PowerShell 下使用 `go build -o jwc-302.exe .`，并以 `.\jwc-302.exe` 启动。`go` 会按 `toolchain` 指令选择推荐工具链；离线环境请预装相应版本并缓存依赖。
@@ -70,7 +70,7 @@ Windows PowerShell 使用 `curl.exe`。默认仅监听 `127.0.0.1:8080`；本机
 
 ## 配置参考
 
-推荐从 [config.example.json](config.example.json) 复制 JSON 配置，或参考 [.env.example](.env.example)。程序不会自动读取 `.env`，需由 shell、systemd 或容器注入环境变量。
+推荐从 [examples/config.example.json](examples/config.example.json) 复制 JSON 配置，或参考 [examples/.env.example](examples/.env.example)。程序不会自动读取 `.env`，需由 shell、systemd 或容器注入环境变量。
 
 | 命令行 | 环境变量 / JSON 键 | 默认值 | 用途 |
 |---|---|---|---|
@@ -192,10 +192,9 @@ ranges.go                     CIDR 读取、快照替换、重载状态与任务
 main_test.go / behavior_test.go 基础回归、HTTP、并发与 fuzz
 operators_test.go             配置、排除规则、监控和日志等运维功能测试
 process_integration_test.go    真实可执行程序集成测试
-config.example.json           通用 JSON 配置模板
-.env.example                  环境变量参考
-jwc-302.service               systemd 模板
-examples/                     示例排除网段
+iprange.txt                   默认示例校内网段
+examples/                     JSON、环境变量和排除网段示例
+deploy/jwc-302.service        systemd 模板
 docs/operations.md            部署、验收、监控和回滚手册
 ```
 

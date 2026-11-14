@@ -55,7 +55,7 @@ jobs:
       - name: Static analysis (including process tests)
         run: go vet -tags=integration ./...
       - name: Validate shipped configuration and CIDR examples
-        run: go run . -config config.example.json -exclude-iprange examples/excluded-iprange.txt -check-config
+        run: go run . -config examples/config.example.json -exclude-iprange examples/excluded-iprange.txt -check-config
       - name: Unit and real HTTP behavior tests (random order, repeated)
         run: go test -shuffle=on -count=3 -timeout=120s -coverprofile=coverage.out ./...
       - name: Real executable functional tests

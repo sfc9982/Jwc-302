@@ -19,7 +19,7 @@ NAT 后只能根据网关实际观察到的地址分流。如果某一 NAT 地�
 
 ## 2. 准备配置
 
-复制 `config.example.json`，填写两个目标和可信代理。以下例子展示同机 Nginx、IPv6，以及 VPN 排除池：
+复制 `examples/config.example.json`，填写两个目标和可信代理。该示例的校内网段路径为 `../iprange.txt`；复制配置到生产目录后，应改为与生产文件相符的路径。以下例子展示同机 Nginx、IPv6，以及 VPN 排除池：
 
 ```json
 {
@@ -81,12 +81,12 @@ PowerShell 交叉编译时，设置 `$env:GOOS='linux'` 与 `$env:GOARCH='amd64'
 sudo install -d -m 755 /opt/jwc-302
 sudo install -d -m 750 -o root -g www-data /etc/jwc-302
 sudo install -m 755 jwc-302 /opt/jwc-302/jwc-302
-sudo install -m 640 -o root -g www-data config.example.json /etc/jwc-302/config.json
+sudo install -m 640 -o root -g www-data examples/config.example.json /etc/jwc-302/config.json
 sudo install -m 640 -o root -g www-data iprange.txt /etc/jwc-302/iprange.txt
-# 编辑 config.json，替换示例目标和网段。
+# 编辑 config.json，替换示例目标，并将 iprange_file 改为 iprange.txt。
 # 若启用排除文件，将它安装到 JSON 指定的路径，保持 www-data 可读。
 sudo -u www-data /opt/jwc-302/jwc-302 -config=/etc/jwc-302/config.json -check-config
-sudo install -m 644 jwc-302.service /etc/systemd/system/jwc-302.service
+sudo install -m 644 deploy/jwc-302.service /etc/systemd/system/jwc-302.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now jwc-302
 sudo systemctl status jwc-302
@@ -101,7 +101,7 @@ sudo journalctl -u jwc-302 -f
 
 校验不会绑定监听端口或探测上游，不能代替实际请求验收。建议以服务账户执行，及早发现文件权限问题。
 
-可选的 `/etc/jwc-302/environment` 是 systemd 环境文件，格式见 `.env.example`。其中的非空值会覆盖 JSON；只保留确实要覆盖的键，避免复制整份模板后意外覆盖 JSON 中的生产地址。
+可选的 `/etc/jwc-302/environment` 是 systemd 环境文件，格式见 `examples/.env.example`。其中的非空值会覆盖 JSON；只保留确实要覆盖的键，避免复制整份模板后意外覆盖 JSON 中的生产地址。
 
 服务模板中的 `ExecStartPre` 会阻止错误配置启动。`ProtectSystem=strict` 限制服务写入系统目录；网段由外部运维过程维护。默认 `TimeoutStopSec=20s`，应大于 `shutdown_timeout` 并留有余量。
 

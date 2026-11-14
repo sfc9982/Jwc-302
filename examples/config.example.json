@@ -1,6 +1,6 @@
 {
   "listen_addr": "127.0.0.1:8080",
-  "iprange_file": "iprange.txt",
+  "iprange_file": "../iprange.txt",
   "exclude_iprange_file": "",
   "internal_url": "https://internal.example.edu/jsxsd/",
   "external_url": "https://vpn.example.edu/jsxsd/",

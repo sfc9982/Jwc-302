@@ -63,11 +63,11 @@ jobs:
             binary=jwc-302; [ "$os" = windows ] && binary=jwc-302.exe
             GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$TAG -X main.commit=$sha -X main.buildTime=$built" -o "dist/$name/$binary" .
             if [ "$target" = linux-amd64 ]; then "dist/$name/$binary" -version | grep -F "$TAG"; fi
-            cp README.md config.example.json iprange.txt "dist/$name/"
+            cp README.md iprange.txt "dist/$name/"
             cp docs/operations.md docs/performance.md docs/performance-baseline.txt "dist/$name/docs/"
-            mkdir "dist/$name/examples"; cp examples/excluded-iprange.txt "dist/$name/examples/"
+            mkdir "dist/$name/examples"; cp examples/config.example.json examples/.env.example examples/excluded-iprange.txt "dist/$name/examples/"
             if [ "$os" = linux ]; then
-              cp jwc-302.service "dist/$name/"
+              mkdir "dist/$name/deploy"; cp deploy/jwc-302.service "dist/$name/deploy/"
               tar -C dist -czf "dist/$name.tar.gz" "$name"
             else
               (cd dist && zip -qr "$name.zip" "$name")
