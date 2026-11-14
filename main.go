@@ -9,8 +9,8 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -19,10 +19,18 @@ import (
 
 var logger *slog.Logger
 
+var version = "dev"
+var commit = "unknown"
+var buildTime = "unknown"
+
 func main() { os.Exit(run()) }
 
 func run() int {
 	cfg := parseConfig()
+	if cfg.Version {
+		fmt.Printf("jwc-302 %s commit=%s built=%s go=%s\n", version, commit, buildTime, runtime.Version())
+		return 0
+	}
 	initLogger(cfg)
 	if err := loadRangeFiles(cfg.IPRangeFile, cfg.ExcludeIPRangeFile); err != nil {
 		logger.Error("failed to load iprange file", "error", err)
@@ -42,10 +50,11 @@ func run() int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	service := newService(cfg)
 	if cfg.ReloadInterval > 0 {
-		startReloader(ctx, cfg)
+		startReloader(ctx, cfg, service.metrics)
 	}
-	server := &fasthttp.Server{Handler: makeHandler(cfg), ReadTimeout: cfg.RequestTimeout, WriteTimeout: cfg.RequestTimeout}
+	server := &fasthttp.Server{Handler: service.handler(), ReadTimeout: cfg.RequestTimeout, WriteTimeout: cfg.RequestTimeout}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
 	logger.Info("server started", "addr", listener.Addr().String(), "ip_ranges", included, "excluded_ranges", excluded)
@@ -81,7 +90,10 @@ func initLogger(cfg *config) {
 	logger = slog.New(handler)
 }
 
-func makeHandler(cfg *config) func(*fasthttp.RequestCtx) {
+func makeHandler(cfg *config) func(*fasthttp.RequestCtx) { return newService(cfg).handler() }
+
+func (s *service) handler() func(*fasthttp.RequestCtx) {
+	cfg := s.cfg
 	return func(ctx *fasthttp.RequestCtx) {
 		request, err := parseOriginURI(string(ctx.RequestURI()))
 		if err != nil {
@@ -90,12 +102,16 @@ func makeHandler(cfg *config) func(*fasthttp.RequestCtx) {
 		}
 		path := request.Path
 		if cfg.HealthPath != "" && path == cfg.HealthPath {
-			healthHandler(ctx, cfg)
+			s.serveHealth(ctx, false)
 			return
 		}
 
 		if cfg.ReadyPath != "" && path == cfg.ReadyPath {
-			serveHealth(ctx, cfg, true)
+			s.serveHealth(ctx, true)
+			return
+		}
+		if cfg.MetricsPath != "" && path == cfg.MetricsPath {
+			s.metrics.handler(ctx)
 			return
 		}
 		realIP := clientIP(ctx, cfg.trustedProxies)
@@ -118,6 +134,15 @@ func makeHandler(cfg *config) func(*fasthttp.RequestCtx) {
 		ctx.Response.Header.Set("Cache-Control", "no-store")
 		ctx.Response.Header.Set("Location", target)
 		ctx.SetStatusCode(cfg.RedirectCode)
+		if s.metrics != nil {
+			route := "external"
+			if matched {
+				route = "internal"
+			} else if excluded {
+				route = "excluded"
+			}
+			s.metrics.redirects.WithLabelValues(route, fmt.Sprint(cfg.RedirectCode)).Inc()
+		}
 
 		logURI, logTarget := string(ctx.RequestURI()), target
 		if !cfg.LogQuery {
@@ -240,18 +265,24 @@ func buildTargetFromURI(base string, rel *url.URL) (string, error) {
 }
 
 type healthResponse struct {
-	Status         string            `json:"status"`
-	Time           string            `json:"time"`
-	IPRanges       int               `json:"ip_ranges"`
-	Upstream       map[string]string `json:"upstream,omitempty"`
-	ExcludedRanges int               `json:"excluded_ranges"`
-	LastReload     string            `json:"last_reload,omitempty"`
-	RulesStale     bool              `json:"rules_stale"`
+	Status            string            `json:"status"`
+	Time              string            `json:"time"`
+	IPRanges          int               `json:"ip_ranges"`
+	Upstream          map[string]string `json:"upstream,omitempty"`
+	ExcludedRanges    int               `json:"excluded_ranges"`
+	LastReload        string            `json:"last_reload,omitempty"`
+	RulesStale        bool              `json:"rules_stale"`
+	UpstreamCheckedAt string            `json:"upstream_checked_at,omitempty"`
 }
 
 func healthHandler(ctx *fasthttp.RequestCtx, cfg *config) { serveHealth(ctx, cfg, false) }
 
 func serveHealth(ctx *fasthttp.RequestCtx, cfg *config, readiness bool) {
+	newService(cfg).serveHealth(ctx, readiness)
+}
+
+func (s *service) serveHealth(ctx *fasthttp.RequestCtx, readiness bool) {
+	cfg := s.cfg
 	resp := healthResponse{
 		Status: "ok",
 		Time:   time.Now().Format(time.RFC3339),
@@ -269,14 +300,12 @@ func serveHealth(ctx *fasthttp.RequestCtx, cfg *config, readiness bool) {
 	}
 
 	if cfg.CheckUpstream || (readiness && cfg.ReadyCheckUpstream) {
-		// Reserve half the response timeout for scheduling and writing the result.
-		timeout := cfg.RequestTimeout - cfg.RequestTimeout/2
-		var internal, external string
-		var checks sync.WaitGroup
-		checks.Go(func() { internal = checkUpstream(cfg.InternalRedirectURL, timeout) })
-		checks.Go(func() { external = checkUpstream(cfg.ExternalRedirectURL, timeout) })
-		checks.Wait()
+		result := s.probes.get(cfg.RequestTimeout, cfg.UpstreamCacheTTL, cfg.InternalRedirectURL, cfg.ExternalRedirectURL, s.metrics)
+		internal, external := result.internal, result.external
 		resp.Upstream = map[string]string{"internal": internal, "external": external}
+		if !result.checkedAt.IsZero() {
+			resp.UpstreamCheckedAt = result.checkedAt.Format(time.RFC3339)
+		}
 		if internal != "ok" || external != "ok" {
 			resp.Status = "degraded"
 		}

@@ -179,6 +179,12 @@ curl -i http://127.0.0.1:8080/ready
 
 ## 7. 监控与故障排查
 
+通过 `metrics_path: "/metrics"` 或 `-metrics=/metrics` 启用 Prometheus 指标；默认关闭，启用后与业务共用监听地址。使用 `curl http://127.0.0.1:8080/metrics` 验证，并在 Prometheus 中配置抓取目标。通过绑定地址或反向代理访问控制限制指标访问。指标涵盖跳转、规则重载及状态、上游实际探测与耗时、构建信息；标签不包含客户端 IP 或 URL。
+
+上游探测成功和失败都缓存 `upstream_cache_ttl`（默认 5 秒），并发请求共享一轮探测。设置为 `0` 关闭结果缓存。状态变化最多经过一个缓存周期才反映；健康 JSON 的 `upstream_checked_at` 标识本轮探测完成时间。规则重载失败不受缓存影响。
+
+发布包附带 `SHA256SUMS`，部署前在下载目录运行 `sha256sum -c SHA256SUMS --ignore-missing`，并用 `jwc-302 -version` 核对版本和提交。保留旧安装包以便回滚。
+
 推荐监控策略：
 
 - **存活**：探测 `/health`。保持 `check_upstream=false`，避免上游故障触发网关重启风暴。

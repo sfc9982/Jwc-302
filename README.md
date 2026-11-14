@@ -13,6 +13,8 @@
 - **上线前校验**：`-check-config` 校验配置、校内与排除网段文件后退出，不监听端口、不访问上游。
 - **网段排除**：VPN / 访客地址池即使处于校内大网段中，也可以强制进入校外入口。
 - **一致热重载**：校内与排除文件均解析成功后一起替换；任一失败保留整组旧规则。
+- **可选指标**：启用 Prometheus 抓取端点，观察跳转、重载、规则状态和实际上游探测。
+- **版本发布**：版本标签通过测试后自动发布 Linux / Windows 安装包和 SHA-256 校验文件。
 - **存活与就绪分离**：`/health` 用于进程存活；`/ready` 在网段重载失败时返回 503，可独立开启上游探测。
 - **跳转策略**：默认 302 适合入口导航；可选 307 保留客户端请求方法与请求体。
 - **默认日志脱敏**：URI 和目标地址的查询参数默认不进入请求日志；真实 Location 保持完整。
@@ -81,6 +83,8 @@ Windows PowerShell 使用 `curl.exe`。默认仅监听 `127.0.0.1:8080`；本机
 | `-external` | `EXTERNAL_URL` / `external_url` | `https://vpn.example.edu/jsxsd/` | 校外基地址 |
 | `-health` | `HEALTH_PATH` / `health_path` | `/health` | 存活端点，显式空字符串关闭 |
 | `-ready` | `READY_PATH` / `ready_path` | `/ready` | 就绪端点，显式空字符串关闭 |
+| `-metrics` | `METRICS_PATH` / `metrics_path` | 空 | Prometheus 指标端点，设置为 `/metrics` 启用 |
+| `-upstream-cache-ttl` | `UPSTREAM_CACHE_TTL` / `upstream_cache_ttl` | `5s` | 上游探测结果缓存时间；0 关闭结果缓存 |
 | `-trusted-proxies` | `TRUSTED_PROXIES` / `trusted_proxies` | 空 | 可信代理 CIDR，逗号分隔 |
 | `-reload-interval` | `RELOAD_INTERVAL` / `reload_interval` | `5m` | 两个网段文件的读取周期；0 关闭 |
 | `-request-timeout` | `REQUEST_TIMEOUT` / `request_timeout` | `5s` | 请求读写超时；上游探测使用约一半预算 |
@@ -132,7 +136,7 @@ JSON **显式设置**的网段相对路径基于 JSON 文件目录；CLI、环�
 }
 ```
 
-探测接受 2xx/3xx，不跟随重定向，响应体限制 1 MiB。结果只代表网关服务器到上游的可达性，不验证最终登录页面。每次健康请求都会执行启用的探测，监控频率应考虑上游容量；使用示例目标时保持探测关闭。
+探测接受 2xx/3xx，不跟随重定向，响应体限制 1 MiB。结果只代表网关服务器到上游的可达性，不验证最终登录页面。上游探测结果默认缓存 5 秒，并发请求共用同一轮探测；上游状态变化最多延迟一个缓存周期反映。缓存关闭时仍会合并并发探测；使用示例目标时保持探测关闭。
 
 默认请求日志的 `uri`、`target` 不含查询串，`Location` 仍保留原查询参数。`log_query=true` 仅用于受控排障，结束后关闭。日志包含客户端 IP，请按本单位的访问与保留策略管理。
 
@@ -162,6 +166,12 @@ go test -run='^$' -fuzz='^FuzzBuildTarget$' -fuzztime=20s -parallel=2 .
 测试覆盖配置优先级和严格 JSON 校验、IP/代理信任边界、排除网段、原子规则更新、307 实际 POST 方法/请求体保留、日志查询脱敏、健康与就绪隔离、失败恢复和 Linux SIGTERM 退出。Windows 不执行 POSIX SIGTERM 断言，由 Linux CI 覆盖。
 
 [Dependabot](.github/dependabot.yml) 每周检查 Go 模块和 Actions 更新。
+
+### 发布与性能基线
+
+`-version` 输出版本、提交、构建时间和 Go 版本，无需配置文件。推送 `vMAJOR.MINOR.PATCH` 或带预发布后缀的标签后，CI 通过会自动公开 Release，附带 Linux amd64 / arm64、Windows amd64 安装包及 `SHA256SUMS`。本地构建显示 `dev`。
+
+性能基准及实测结果见 [性能报告](docs/performance.md)；手动运行 Performance baseline 工作流可保存新的测量结果。
 
 ## 升级说明
 

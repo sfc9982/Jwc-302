@@ -25,6 +25,9 @@ type config struct {
 	ExternalRedirectURL string
 	HealthPath          string
 	ReadyPath           string
+	MetricsPath         string
+	UpstreamCacheTTL    time.Duration
+	Version             bool
 	ReloadInterval      time.Duration
 	RequestTimeout      time.Duration
 	ShutdownTimeout     time.Duration
@@ -43,7 +46,7 @@ func defaultConfig() *config {
 		ListenAddr: "127.0.0.1:8080", IPRangeFile: "iprange.txt",
 		InternalRedirectURL: "https://internal.example.edu/jsxsd/", ExternalRedirectURL: "https://vpn.example.edu/jsxsd/",
 		HealthPath: "/health", ReadyPath: "/ready", ReloadInterval: 5 * time.Minute,
-		RequestTimeout: 5 * time.Second, ShutdownTimeout: 10 * time.Second, RedirectCode: 302,
+		UpstreamCacheTTL: 5 * time.Second, RequestTimeout: 5 * time.Second, ShutdownTimeout: 10 * time.Second, RedirectCode: 302,
 	}
 }
 
@@ -61,6 +64,8 @@ func configOptions(c *config) []configOption {
 		{"external", "EXTERNAL_URL", "external redirect base URL", &c.ExternalRedirectURL},
 		{"health", "HEALTH_PATH", "health endpoint (empty to disable)", &c.HealthPath},
 		{"ready", "READY_PATH", "readiness endpoint (empty to disable)", &c.ReadyPath},
+		{"metrics", "METRICS_PATH", "metrics endpoint (empty to disable)", &c.MetricsPath},
+		{"upstream-cache-ttl", "UPSTREAM_CACHE_TTL", "upstream probe cache lifetime (0 disables caching)", &c.UpstreamCacheTTL},
 		{"trusted-proxies", "TRUSTED_PROXIES", "trusted proxy CIDRs, comma separated", &c.TrustedProxies},
 		{"reload-interval", "RELOAD_INTERVAL", "CIDR reload interval (0 to disable)", &c.ReloadInterval},
 		{"request-timeout", "REQUEST_TIMEOUT", "request and upstream timeout budget", &c.RequestTimeout},
@@ -125,6 +130,7 @@ func readConfig(args []string, getenv func(string) string, output io.Writer) (*c
 	flags := flag.NewFlagSet("jwc-302", flag.ContinueOnError)
 	flags.SetOutput(output)
 	configFile := flags.String("config", getenv("CONFIG_FILE"), "optional JSON configuration file")
+	versionFlag := flags.Bool("version", false, "print build information and exit")
 	checkConfig := flags.Bool("check-config", false, "validate configuration and CIDR files, then exit")
 	for _, option := range configOptions(cli) {
 		switch value := option.value.(type) {
@@ -143,6 +149,9 @@ func readConfig(args []string, getenv func(string) string, output io.Writer) (*c
 	}
 	if flags.NArg() != 0 {
 		return nil, fmt.Errorf("unexpected positional arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	if *versionFlag {
+		return &config{Version: true}, nil
 	}
 	visited := map[string]bool{}
 	flags.Visit(func(f *flag.Flag) { visited[f.Name] = true })
@@ -264,8 +273,8 @@ func parseConfig() *config {
 }
 
 func validateConfig(cfg *config) error {
-	if cfg.RequestTimeout <= 0 || cfg.ShutdownTimeout <= 0 || cfg.ReloadInterval < 0 {
-		return fmt.Errorf("request-timeout and shutdown-timeout must be positive; reload-interval must be non-negative")
+	if cfg.RequestTimeout <= 0 || cfg.ShutdownTimeout <= 0 || cfg.ReloadInterval < 0 || cfg.UpstreamCacheTTL < 0 {
+		return fmt.Errorf("request-timeout and shutdown-timeout must be positive; reload-interval and upstream-cache-ttl must be non-negative")
 	}
 	if _, port, err := net.SplitHostPort(cfg.ListenAddr); err != nil {
 		return fmt.Errorf("invalid listen address: %w", err)
@@ -278,12 +287,12 @@ func validateConfig(cfg *config) error {
 	if cfg.RedirectCode != 302 && cfg.RedirectCode != 307 {
 		return fmt.Errorf("redirect-code must be 302 or 307")
 	}
-	for _, endpoint := range []string{cfg.HealthPath, cfg.ReadyPath} {
+	for _, endpoint := range []string{cfg.HealthPath, cfg.ReadyPath, cfg.MetricsPath} {
 		if endpoint == "" {
 			continue
 		}
 		if !strings.HasPrefix(endpoint, "/") || strings.HasPrefix(endpoint, "//") || strings.ContainsAny(endpoint, "?#%\\ \t\r\n") || unsafePath(endpoint) {
-			return fmt.Errorf("health and ready paths must be plain absolute paths without traversal, query or fragment")
+			return fmt.Errorf("health, ready and metrics paths must be plain absolute paths without traversal, query or fragment")
 		}
 		canonical := path.Clean(endpoint)
 		if endpoint != canonical && endpoint != canonical+"/" {
@@ -293,8 +302,8 @@ func validateConfig(cfg *config) error {
 			return fmt.Errorf("invalid endpoint path: %w", err)
 		}
 	}
-	if cfg.HealthPath != "" && cfg.HealthPath == cfg.ReadyPath {
-		return fmt.Errorf("health and ready paths must differ")
+	if (cfg.HealthPath != "" && (cfg.HealthPath == cfg.ReadyPath || cfg.HealthPath == cfg.MetricsPath)) || (cfg.ReadyPath != "" && cfg.ReadyPath == cfg.MetricsPath) {
+		return fmt.Errorf("health, ready and metrics paths must differ")
 	}
 	for _, base := range []string{cfg.InternalRedirectURL, cfg.ExternalRedirectURL} {
 		u, err := url.Parse(base)

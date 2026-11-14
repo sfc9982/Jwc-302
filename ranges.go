@@ -84,7 +84,7 @@ func loadRangeFiles(includeFile, excludeFile string) error {
 
 func loadIPRanges(filename string) error { return loadRangeFiles(filename, "") }
 
-func startReloader(ctx context.Context, cfg *config) <-chan struct{} {
+func startReloader(ctx context.Context, cfg *config, collectors ...*gatewayMetrics) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -96,8 +96,14 @@ func startReloader(ctx context.Context, cfg *config) <-chan struct{} {
 				return
 			case <-ticker.C:
 				if err := loadRangeFiles(cfg.IPRangeFile, cfg.ExcludeIPRangeFile); err != nil {
+					if len(collectors) > 0 && collectors[0] != nil {
+						collectors[0].reloads.WithLabelValues("failure").Inc()
+					}
 					logger.Warn("failed to reload iprange file", "error", err)
 					continue
+				}
+				if len(collectors) > 0 && collectors[0] != nil {
+					collectors[0].reloads.WithLabelValues("success").Inc()
 				}
 				logger.Info("reloaded iprange files")
 			}

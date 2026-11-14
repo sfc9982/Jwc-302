@@ -1,0 +1,85 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  validate-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate semantic version tag
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+\.)*[0-9A-Za-z-]+)?$ ]]; then
+            echo 'Invalid release tag' >&2; exit 1
+          fi
+          if [[ "$TAG" == *-* ]]; then
+            IFS=. read -ra parts <<< "${TAG#*-}"
+            for part in "${parts[@]}"; do
+              if [[ "$part" =~ ^0[0-9]+$ ]]; then echo 'Invalid numeric prerelease identifier' >&2; exit 1; fi
+            done
+          fi
+  test:
+    needs: validate-tag
+    uses: ./.github/workflows/ci.yml
+  release:
+    needs: [validate-tag, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GOTOOLCHAIN: local
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          sha=$(git rev-parse HEAD)
+          for target in linux-amd64 linux-arm64 windows-amd64; do
+            os=${target%-*}; arch=${target#*-}
+            name="jwc-302-${TAG}-${target}"
+            mkdir -p "dist/$name/docs"
+            binary=jwc-302; [ "$os" = windows ] && binary=jwc-302.exe
+            GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$TAG -X main.commit=$sha -X main.buildTime=$built" -o "dist/$name/$binary" .
+            if [ "$target" = linux-amd64 ]; then "dist/$name/$binary" -version | grep -F "$TAG"; fi
+            cp README.md config.example.json iprange.txt "dist/$name/"
+            cp docs/operations.md docs/performance.md docs/performance-baseline.txt "dist/$name/docs/"
+            mkdir "dist/$name/examples"; cp examples/excluded-iprange.txt "dist/$name/examples/"
+            if [ "$os" = linux ]; then
+              cp jwc-302.service "dist/$name/"
+              tar -C dist -czf "dist/$name.tar.gz" "$name"
+            else
+              (cd dist && zip -qr "$name.zip" "$name")
+            fi
+            rm -r "dist/$name"
+          done
+          (cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS && sha256sum -c SHA256SUMS)
+          for archive in dist/*.tar.gz; do tar -tzf "$archive" >/dev/null; done
+          for archive in dist/*.zip; do unzip -t "$archive" >/dev/null; done
+      - name: Publish release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --json isDraft --jq '.isDraft' > existing.txt 2>/dev/null; then
+            if [ "$(cat existing.txt)" != true ]; then echo 'Release already published' >&2; exit 1; fi
+            for asset in dist/*; do gh release upload "$TAG" "$asset" --clobber; done
+          else
+            args=(--verify-tag --generate-notes --draft)
+            [[ "$TAG" == *-* ]] && args+=(--prerelease)
+            gh release create "$TAG" "${args[@]}" dist/*
+          fi
+          gh release edit "$TAG" --draft=false

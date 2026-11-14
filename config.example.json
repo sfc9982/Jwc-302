@@ -7,6 +7,8 @@
   "trusted_proxies": "",
   "health_path": "/health",
   "ready_path": "/ready",
+  "metrics_path": "",
+  "upstream_cache_ttl": "5s",
   "reload_interval": "5m",
   "request_timeout": "5s",
   "shutdown_timeout": "10s",
