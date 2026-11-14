@@ -38,9 +38,16 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Read recommended Go toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          version=$(awk '$1 == "toolchain" {sub(/^go/, "", $2); print $2}' go.mod)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: ${{ steps.toolchain.outputs.version }}
           cache: true
       - name: Build and package
         shell: bash
